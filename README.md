@@ -26,7 +26,7 @@ content = read(query) ← 查内容表
 
 **纠偏（解决近因偏置）**：content 查出来后，通过余弦相似度去「attend」h 里跟它相关的 token，**定位**句中的关键 token，而不是只盯最后一个 token。
 
-**g 连续累积（连乘猜想）**：`g_j = normalize(g_init ⊙ ∏(1+normalize(query_k)))` —— 串行 normalize 只压幅值不改方向，所以等价于「累乘 + 最后 normalize」，能用并行 scan 算（O(S·D) 线性）。
+**g 超球面旋转（2026-10-30 修正）**：g 是超球面上的方向，随序列在球面上**切向旋转**——`g_j = normalize(g_0 + Σ_{k≤j} v_⊥(query_k))`，其中 `v_⊥ = normalize(query) - (normalize(query)·g)g` 是切向分量。旧连乘 `g_init ⊙ ∏(1+normalize(query))` 是加法恒等，会方向饱和，已废弃。
 
 **read 逐元素门控（方向/位移分离）**：`content = query ⊙ contents` —— query 既是「查询」也是「门控」，不求和；g 归一化（方向）、content 不归一化（位移），两者分离。
 
@@ -39,7 +39,8 @@ content = read(query) ← 查内容表
 | **v67 并行 g** | 逐位置独立，取最后位置 carry | 短程 toy 4.0x~10.4x、长程 1.0x、补全 58%（窗口 KV，g 消融无贡献） |
 | **v68 content-attends-to-h** | g 仍并行，纠偏改成 content 定位相关 token | 近因偏置修正 4.7x、自然数据 ce 1.195 |
 | 顺序/加性/hybrid/cumprod g | 各种「连续累积」尝试 | 长程都 1.0x（被稀释/洗没） |
-| **v69 cumprod 连续 g + query 门控 read** | g_j = g_init ⊙ ∏(1+normalize(query_k))，read = query ⊙ contents | 正在从零训练，长程待测 |
+| **v69 cumprod 连续 g + query 门控 read** | g_j = g_init ⊙ ∏(1+normalize(query_k))，read = query ⊙ contents | 长程待测；后发现「1+」连乘方向饱和（不同事实方向余弦 ~0.98 撞一起） |
+| **v70 切向旋转 g（2026-10-30）** | g 超球面切向旋转，单头 H_g=1 | 方向能分开（余弦出现负值），长程/词级待测 |
 
 ## 关键结果（2026-10-29）
 
@@ -49,7 +50,7 @@ content = read(query) ← 查内容表
 | 近因偏置修正（答案在句中） | 1.0x → **4.7x** |
 | 相近因果补全（滑动窗口 8-32 字节，自然数据） | **58%** 字节准确率（窗口 KV 局部补全；g 消融显示有/无 g 都是 58%，非 g 贡献） |
 | 自然数据训练（20GB，60000 步） | ce 2.57 → **1.195** |
-| 长程回忆（事实埋 380 字节 filler） | **1.0x 待解**（连乘 + query 门控正在攻） |
+| 长程回忆（事实埋 380 字节 filler） | **1.0x 待解**（切向旋转 + query 门控正在攻） |
 
 ---
 
@@ -76,11 +77,11 @@ content = read(query) ← 查内容表
 - ✅ 短程跨 batch 回忆（合成数据 4.0x~10.4x），近因偏置修正 4.7x；
 - ✅ 自然数据训练 ce 1.195（60000 步）；
 - ⚠️ 相近因果补全 58%（窗口 KV 局部补全，有 g 无 g 一样，**非 g 实现**）；
-- 🔄 长程回忆 1.0x 待解（连乘累积 + query 门控正在从零重训验证）；
+- 🔄 长程回忆 1.0x 待解（切向旋转 + query 门控正在从零重训验证）；
 - 🔄 源码暂未开源（整理中）。
 
 ## 作者
 
-**yangtianpeng** · 2026-10-29
+**yangtianpeng** · 2026-10-30
 
 *本文档用于记录研究优先权（priority），完整源码与训练细节后续开放。*
