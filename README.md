@@ -15,20 +15,18 @@
 ## 核心思想
 
 ```
-g（先验方向）      ← 持久状态，跨 batch 携带记忆，不随序列长度增长
-contents（内容表）  ← 可学习的内容字典（「世界的事实」）
-Rh = R @ h（偏转）  ← 「选择头」
-query = g ⊙ Rh      ← 「互补」：先验 ⊙ 观测
-content = read(query) ← 查内容表
+g（快权重矩阵 [d,d]）     ← 持久状态，跨 batch 携带记忆，不随序列长度增长
+contents（知识矩阵 [d,d]） ← 可学习的知识权重
+Rh = R @ h（偏转）         ← 「选择头」（激活锚点）
+query = normalize(g @ Rh)      ← g 投影 Rh → 锚点方向
+content = contents @ query      ← 知识权重投影锚点 → 检索记忆
+error = (h - h.mean) - content  ← 具体 − 记忆 = 知识冲突
+g = normalize(g + error ⊗ Rh)   ← 外积快权重累积（连加，无衰减）
 ```
 
-**核心一句**：`query = g ⊙ (R @ h)` —— 先验（g）与观测（h 经 attention 的偏转）在 query 里互补，再一起去查内容表、做纠偏。
+**核心一句**：`content = contents @ normalize(g @ (R @ h))` —— g（快权重矩阵）把「当前偏转 Rh」投影成「锚点」，contents（知识矩阵）再把锚点投影成「检索出的记忆」；预测误差（`h - h.mean - content`）以**外积**（`error ⊗ Rh`，即 Wqkv 的「梯度 = 误差 ⊗ 输入」）写回 g。
 
-**纠偏（解决近因偏置）**：content 查出来后，通过余弦相似度去「attend」h 里跟它相关的 token，**定位**句中的关键 token，而不是只盯最后一个 token。
-
-**g 连续累积（连乘猜想）**：`g_j = normalize(g_init ⊙ ∏(1+normalize(query_k)))` —— 串行 normalize 只压幅值不改方向，所以等价于「累乘 + 最后 normalize」，能用并行 scan 算（O(S·D) 线性）。
-
-**read 逐元素门控（方向/位移分离）**：`content = query ⊙ contents` —— query 既是「查询」也是「门控」，不求和；g 归一化（方向）、content 不归一化（位移），两者分离。
+**g 连续累积（快权重）**：`g_j = normalize(g_{j-1} + error_j ⊗ Rh_j)` —— 外积连加（无衰减，外层 normalize 钳幅），等价于「连加 + 并行 cumsum」，O(S·D²) 线性。
 
 ---
 
@@ -40,6 +38,7 @@ content = read(query) ← 查内容表
 | **v68 content-attends-to-h** | g 仍并行，纠偏改成 content 定位相关 token | 近因偏置修正 4.7x、自然数据 ce 1.195 |
 | 顺序/加性/hybrid/cumprod g | 各种「连续累积」尝试 | 长程都 1.0x（被稀释/洗没） |
 | **v69 cumprod 连续 g + query 门控 read** | g_j = g_init ⊙ ∏(1+normalize(query_k))，read = query ⊙ contents | 正在从零训练，长程待测 |
+| **v70 快权重 g（矩阵）+ 锚点检索** | g=[d,d] 矩阵，query=normalize(g@Rh)，content=contents@query，g=normalize(g + error⊗Rh) | **correct-vs-wrong 5/5 全对**（合成 5-fact） |
 
 ## 关键结果（2026-10-29）
 
@@ -49,7 +48,7 @@ content = read(query) ← 查内容表
 | 近因偏置修正（答案在句中） | 1.0x → **4.7x** |
 | 相近因果补全（滑动窗口 8-32 字节，自然数据） | **58%** 字节准确率（窗口 KV 局部补全；g 消融显示有/无 g 都是 58%，非 g 贡献） |
 | 自然数据训练（20GB，60000 步） | ce 2.57 → **1.195** |
-| 长程回忆（事实埋 380 字节 filler） | **1.0x 待解**（连乘 + query 门控正在攻） |
+| **快权重 g（矩阵）+ 锚点检索，correct-vs-wrong** | **5/5 全对**（Alice/Bob/Carol/David/Eve 各自正确 g 给最高 P(答案)）；新名字能写入（Frank/Rome → P(R)=0.0495） |
 
 ---
 
@@ -75,12 +74,14 @@ content = read(query) ← 查内容表
 
 - ✅ 短程跨 batch 回忆（合成数据 4.0x~10.4x），近因偏置修正 4.7x；
 - ✅ 自然数据训练 ce 1.195（60000 步）；
+- ✅ **快权重 g（矩阵）+ 锚点检索：correct-vs-wrong 5/5 全对**（记忆版本第一次成功，2026-10-31）；
 - ⚠️ 相近因果补全 58%（窗口 KV 局部补全，有 g 无 g 一样，**非 g 实现**）；
-- 🔄 长程回忆 1.0x 待解（连乘累积 + query 门控正在从零重训验证）；
+- 🔄 覆盖（同结构替换）半成品：无衰减加法是「混合」不是「替换」，待加指数衰减 `g = λ·g + outer`；
+- 🔄 提速：外积物化 [S,d,d] 太慢，待改「顺序累加进 [d,d]」；
 - 🔄 源码暂未开源（整理中）。
 
 ## 作者
 
-**yangtianpeng** · 2026-10-29
+**yangtianpeng** · 2026-10-31
 
 *本文档用于记录研究优先权（priority），完整源码与训练细节后续开放。*
